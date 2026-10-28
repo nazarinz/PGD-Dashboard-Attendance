@@ -562,8 +562,42 @@ def gs_get_ws(sh, title, header):
     return ws
 
 
+_DERIVED_PERIOD_COLS = ('Period_Key', 'Period_Label', 'Period_Date')
+
+
+def _a1(row, col):
+    letters = ''
+    while col:
+        col, rem = divmod(col - 1, 26)
+        letters = chr(65 + rem) + letters
+    return f'{letters}{row}'
+
+
+def gs_migrate_period_cols(ws, df_cols):
+    """Sheet lama tanpa Period_Key/Label/Date: tambahkan 3 kolom itu di kanan dan isi dari kolom Period.
+    Hanya menambah kolom (tidak mengubah/menghapus data). Return True jika ada migrasi."""
+    header = ws.row_values(1)
+    missing = [c for c in _DERIVED_PERIOD_COLS if c in df_cols and c not in header]
+    if not missing or 'Period' not in header or (set(df_cols) - set(header)) - set(_DERIVED_PERIOD_COLS):
+        return False
+    per = ws.col_values(header.index('Period') + 1)[1:]
+    out = [missing]
+    for v in per:
+        try:
+            info_ = period_info(int(float(v)))
+        except (ValueError, TypeError, IndexError):
+            out.append([''] * len(missing))
+            continue
+        cell = {'Period_Key': info_['Period_Key'], 'Period_Label': "'" + info_['Period_Label'],
+                'Period_Date': info_['Period_Date'].strftime('%Y-%m-%d')}
+        out.append([cell[c] for c in missing])
+    ws.update(range_name=_a1(1, len(header) + 1), values=out, raw=False)
+    return True
+
+
 def gs_upsert(ws, df, key_col='Period_Key'):
     """Ganti semua baris dengan Period_Key yang ada di df, lalu tambahkan baris baru. Return (dihapus, ditambah)."""
+    gs_migrate_period_cols(ws, set(df.columns))
     header = ws.row_values(1)
     if set(header) != set(df.columns):
         raise ValueError(f"Kolom sheet '{ws.title}' tidak sama dengan data. "
