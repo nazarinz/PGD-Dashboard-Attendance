@@ -55,6 +55,7 @@ STATUS = {  # kode: (deskripsi, grup)
     'A': ('Alpa', 'Alpa'), 'H': ('Hari Libur', 'Libur'),
     'OFF': ('Weekend (tidak ada kode di PDF)', 'Weekend'),
     'NODATA': ('Hari kerja tanpa kode di PDF', 'No Data'),
+    'BELUM': ('Belum berjalan (setelah tanggal data valid; HRIS mengisi A otomatis)', 'Belum Berjalan'),
 }
 # Koreksi manual untuk hari kerja yang kosong di PDF HRIS (sudah dikonfirmasi user).
 # Format: (NIK, 'YYYY-MM-DD'): status. Hanya berlaku jika sel di PDF memang kosong.
@@ -201,14 +202,19 @@ def parse_pdf(file_obj):
     return period, out
 
 
-def transform(records):
-    """Raw records -> (daily df, monthly df, qa-issue list)."""
+def transform(records, cutoff=None):
+    """Raw records -> (daily df, monthly df, qa-issue list).
+
+    cutoff: tanggal terakhir data HRIS yang valid. Hari kerja setelah tanggal ini diberi Status 'BELUM'
+    (HRIS otomatis mengisi A untuk hari yang belum berjalan). None = tidak ada pemotongan."""
     daily, summ, issues = [], [], []
     for r in records:
         y, m = int(r['Period'][:4]), int(r['Period'][4:])
         nd = calendar.monthrange(y, m)[1]
         sv = dict(zip(SUM_COLS, r['svals']))
         pkey, plabel, pdate = y * 100 + m, f'{MONTH_ID[m - 1]} {y}', dt.date(y, m, 1)
+        month_end = dt.date(y, m, nd)
+        dcut = month_end if cutoff is None else min(cutoff, month_end)
 
         # validasi 1: total lembur
         if r['ot_total'] is None:
@@ -232,18 +238,20 @@ def transform(records):
                     code, source = manual, 'Manual'
                 else:
                     code = 'OFF' if date.weekday() >= 5 else 'NODATA'
+            if date > dcut and date.weekday() < 5 and code != 'H':
+                code = 'BELUM'                      # Raw_Code tetap menyimpan kode asli dari PDF
             daily.append([int(r['Period']), date, date.strftime('%a'), r['NIK'], r['Name'], raw, code,
                           STATUS.get(code, ('', 'Unknown'))[1],
-                          0 if code in ('OFF', 'H', 'NODATA') else 1,
-                          r['ot'].get(d, 0.0), source, pkey, plabel, pdate])
+                          0 if code in ('OFF', 'H', 'NODATA', 'BELUM') else 1,
+                          r['ot'].get(d, 0.0), source, pkey, plabel, pdate, dcut])
         summ.append([int(r['Period']), r['No'], r['NIK'], r['Name']] +
-                    [sv.get(c) for c in SUM_COLS] + [r['ot_total'], pkey, plabel, pdate])
+                    [sv.get(c) for c in SUM_COLS] + [r['ot_total'], pkey, plabel, pdate, dcut])
 
     D = pd.DataFrame(daily, columns=['Period', 'Date', 'Day_Name', 'NIK', 'Name', 'Raw_Code', 'Status',
                                      'Status_Group', 'Is_Workday', 'OT_Hours', 'Status_Source',
-                                     'Period_Key', 'Period_Label', 'Period_Date'])
+                                     'Period_Key', 'Period_Label', 'Period_Date', 'Data_Cutoff'])
     S = pd.DataFrame(summ, columns=['Period', 'No', 'NIK', 'Name'] + SUM_COLS +
-                     ['OT_Total_Reported', 'Period_Key', 'Period_Label', 'Period_Date'])
+                     ['OT_Total_Reported', 'Period_Key', 'Period_Label', 'Period_Date', 'Data_Cutoff'])
     return D, S, issues
 
 
@@ -380,6 +388,7 @@ def build_workbook(D, S, removed=None):
         ('2. Kode I* dinormalisasi ke IR (sesuai hitungan ringkasan HRIS); kode asli di Raw_Code.', False),
         ('3. Baris angka kedua per karyawan diasumsikan jam LEMBUR (OT_Hours). Check_OT toleransi 0,5 jam (pembulatan di HRIS).', False),
         ('3b. Koreksi manual (MANUAL_OVERRIDES di script) ditandai Status_Source = Manual; Raw_Code tetap kosong.', False),
+        ('3c. Data_Cutoff = tanggal terakhir data HRIS yang valid. Hari kerja setelahnya berstatus BELUM (HRIS mengisi A otomatis untuk hari yang belum berjalan), tidak dihitung hari kerja; Raw_Code tetap kode asli.', False),
         ('4. Hari kerja tanpa kode diberi Status NODATA (misal karyawan keluar/masuk di tengah bulan).', False),
         ('5. Kolom CHK, HD, LC, CL4, CL5, CL6, SOR tidak punya legenda di PDF; disimpan apa adanya.', False),
     ]
@@ -397,10 +406,11 @@ def build_workbook(D, S, removed=None):
     for r in range(2, nd + 1):
         ws.cell(row=r, column=2).number_format = 'yyyy-mm-dd'
         ws.cell(row=r, column=10).number_format = '0.0'
-    widths(ws, [10, 12, 10, 10, 30, 10, 9, 13, 11, 10, 14, 11, 12, 12] + ([16] if 'Team' in D.columns else []))
-    pdc = D.columns.get_loc('Period_Date') + 1
-    for r in range(2, nd + 1):
-        ws.cell(row=r, column=pdc).number_format = 'yyyy-mm-dd'
+    widths(ws, [10, 12, 10, 10, 30, 10, 9, 13, 11, 10, 14, 11, 12, 12, 12] + ([16] if 'Team' in D.columns else []))
+    for cname in ('Period_Date', 'Data_Cutoff'):
+        cc_ = D.columns.get_loc(cname) + 1
+        for r in range(2, nd + 1):
+            ws.cell(row=r, column=cc_).number_format = 'yyyy-mm-dd'
     ws.auto_filter.ref = f'A1:{get_column_letter(D.shape[1])}{nd}'
 
     # Employee_Monthly (+ formula check)
@@ -419,10 +429,11 @@ def build_workbook(D, S, removed=None):
             f'=IF(ABS({cOc}{i}-{cOT}{i})<=0.5,"OK","DIFF")'])
     ns = ws.max_row
     header(ws, len(hdr)); body(ws, len(hdr))
-    spc = list(S.columns).index('Period_Date') + 1
-    for r in range(2, ns + 1):
-        ws.cell(row=r, column=spc).number_format = 'yyyy-mm-dd'
-    widths(ws, [10, 6, 10, 30] + ([16] if 'Team' in S.columns else []) + [6] * len(SUM_COLS) + [12, 11, 12, 12, 9, 9, 9, 9])
+    for cname in ('Period_Date', 'Data_Cutoff'):
+        spc = list(S.columns).index(cname) + 1
+        for r in range(2, ns + 1):
+            ws.cell(row=r, column=spc).number_format = 'yyyy-mm-dd'
+    widths(ws, [10, 6, 10, 30] + ([16] if 'Team' in S.columns else []) + [6] * len(SUM_COLS) + [12, 11, 12, 12, 12, 9, 9, 9, 9])
     ws.auto_filter.ref = f'A1:{get_column_letter(len(hdr))}{ns}'
     ws.row_dimensions[1].height = 30
 
@@ -462,6 +473,7 @@ def build_workbook(D, S, removed=None):
         ['Karyawan unik', f'=COUNTA(Dim_Employee!$A$2:$A${ne})', D.NIK.nunique()],
         ['Check_N = DIFF', f'=COUNTIF(Employee_Monthly!${cCN}$2:${cCN}${ns},"DIFF")', 0],
         ['Check_OT = DIFF', f'=COUNTIF(Employee_Monthly!${cCO}$2:${cCO}${ns},"DIFF")', 0],
+        ['Hari belum berjalan (BELUM)', f'=COUNTIF(Attendance_Daily!$G$2:$G${nd},"BELUM")', int((D.Status == 'BELUM').sum())],
         ['Hari kerja NODATA', f'=COUNTIF(Attendance_Daily!$G$2:$G${nd},"NODATA")', int((D.Status == 'NODATA').sum())],
         ['Hari dikoreksi manual (Status_Source = Manual)', f'=COUNTIF(Attendance_Daily!$K$2:$K${nd},"Manual")', int((D.Status_Source == 'Manual').sum())],
     ] + ([['Baris tanpa tim (Unmapped)', f'=COUNTIF(Attendance_Daily!${get_column_letter(D.columns.get_loc("Team") + 1)}$2:${get_column_letter(D.columns.get_loc("Team") + 1)}${nd},"Unmapped")', int((D.Team == 'Unmapped').sum())]] if 'Team' in D.columns else []):
@@ -571,7 +583,7 @@ def gs_get_ws(sh, title, header):
     return ws
 
 
-_DERIVED_PERIOD_COLS = ('Period_Key', 'Period_Label', 'Period_Date')
+_DERIVED_PERIOD_COLS = ('Period_Key', 'Period_Label', 'Period_Date', 'Data_Cutoff')
 
 
 def _a1(row, col):
@@ -597,8 +609,10 @@ def gs_migrate_period_cols(ws, df_cols):
         except (ValueError, TypeError, IndexError):
             out.append([''] * len(missing))
             continue
+        y_, m_ = divmod(info_['Period_Key'], 100)
         cell = {'Period_Key': info_['Period_Key'], 'Period_Label': "'" + info_['Period_Label'],
-                'Period_Date': info_['Period_Date'].strftime('%Y-%m-%d')}
+                'Period_Date': info_['Period_Date'].strftime('%Y-%m-%d'),
+                'Data_Cutoff': dt.date(y_, m_, calendar.monthrange(y_, m_)[1]).strftime('%Y-%m-%d')}
         out.append([cell[c] for c in missing])
     _ensure_grid(ws, len(out), len(header) + len(missing))
     ws.update(range_name=_a1(1, len(header) + 1), values=out, raw=False)
@@ -742,14 +756,14 @@ def run_push(ref, D, S, team_df=None):
 # Streamlit UI
 # ----------------------------------------------------------------------------
 @st.cache_data(show_spinner=False)
-def run_etl(files):
+def run_etl(files, cutoff=None):
     """files: tuple[(filename, bytes)] -> (D, S, issues, per_file_info)"""
     recs, info = [], []
     for fname, content in files:
         period, rows = parse_pdf(io.BytesIO(content))
         info.append(dict(File=fname, Period=period, Employees=len(rows)))
         recs += rows
-    D, S, issues = transform(recs)
+    D, S, issues = transform(recs, cutoff)
     return D, S, issues, info
 
 
@@ -767,6 +781,10 @@ def main():
         st.header('Opsi')
         use_filter = st.checkbox('Hapus karyawan resign (tidak ada di N periode terakhir)', value=True)
         max_missing = st.number_input('N (bulan)', min_value=0, max_value=24, value=1, step=1)
+        today_wib = dt.datetime.now(dt.timezone(dt.timedelta(hours=7))).date()
+        cutoff = st.date_input('Data HRIS valid sampai tanggal', value=today_wib - dt.timedelta(days=1),
+                               help='Hari kerja SETELAH tanggal ini ditandai BELUM (HRIS otomatis mengisi A untuk hari yang '
+                                    'belum berjalan) dan tidak dihitung. Default: kemarin (WIB). Bulan yang sudah lewat tidak terpengaruh.')
         st.header('Google Sheets')
         sid = st.text_input('Spreadsheet URL / ID', value=gs_default_id(),
                             help='Sheet tujuan untuk Looker Studio. Bisa diisi default lewat secrets.toml.')
@@ -781,7 +799,7 @@ def main():
     # jika file/opsi berubah, harus klik lagi.
     sig = (tuple((n, len(b)) for n, b in files),
            (team_up.name, team_up.size) if team_up is not None else None,
-           bool(use_filter), int(max_missing))
+           bool(use_filter), int(max_missing), cutoff)
     if st.button('Proses', type='primary', disabled=not files):
         st.session_state['done_sig'] = sig
         st.session_state['push_pending'] = True
@@ -797,7 +815,7 @@ def main():
 
     try:
         with st.spinner('Memproses PDF...'):
-            D, S, issues, info = run_etl(files)
+            D, S, issues, info = run_etl(files, cutoff)
     except Exception as e:
         st.error(f'Gagal memproses PDF: {e}')
         return
@@ -874,6 +892,13 @@ def main():
     c3.metric('Baris harian', f'{len(D):,}')
     c4.metric('Tingkat hadir', f'{(w.Status_Group == "Hadir").mean():.1%}' if len(w) else '-')
     c5.metric('Total jam lembur', f'{D.OT_Hours.sum():,.1f}')
+
+    # Hari yang belum berjalan
+    belum = D[D.Status == 'BELUM']
+    if len(belum):
+        n_a = int((belum.Raw_Code == 'A').sum())
+        st.info(f'Data valid sampai **{cutoff:%d %b %Y}**. {belum.Date.nunique()} hari kerja sesudahnya '
+                f'({len(belum)} baris) ditandai BELUM dan tidak dihitung; {n_a} di antaranya A otomatis dari HRIS.')
 
     # QA
     if issues:
