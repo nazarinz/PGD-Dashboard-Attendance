@@ -667,7 +667,20 @@ def gs_merge_team(sh, team):
     return len(cur)
 
 
+def add_check_columns(S, D):
+    """Kolom cek Employee_Monthly sebagai nilai (di Excel berupa rumus): N_Calc, OT_Calc, Check_N, Check_OT."""
+    g = (D.groupby(['Period', 'NIK'])
+         .agg(N_Calc=('Status', lambda x: int((x == 'N').sum())), OT_Calc=('OT_Hours', 'sum'))
+         .reset_index())
+    out = S.merge(g, on=['Period', 'NIK'], how='left')
+    out['OT_Calc'] = out['OT_Calc'].round(2)
+    out['Check_N'] = (out['N_Calc'] == out['N']).map({True: 'OK', False: 'DIFF'})
+    out['Check_OT'] = ((out['OT_Calc'] - out['OT_Total_Reported']).abs() <= 0.5).map({True: 'OK', False: 'DIFF'})
+    return out
+
+
 def gs_push(sh, D, S, team_df=None):
+    S = add_check_columns(S, D)
     ws_d = gs_get_ws(sh, GS_TITLES['daily'], list(D.columns))
     d_del, d_add = gs_upsert(ws_d, D)
     ws_m = gs_get_ws(sh, GS_TITLES['monthly'], list(S.columns))
