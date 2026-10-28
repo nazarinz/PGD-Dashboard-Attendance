@@ -627,6 +627,10 @@ def gs_upsert(ws, df, key_col='Period_Key'):
     reqs = [{'deleteDimension': {'range': {'sheetId': ws.id, 'dimension': 'ROWS',
                                            'startIndex': a - 1, 'endIndex': b}}} for a, b in reversed(blocks)]
     if reqs:
+        # Sheets menolak menghapus SEMUA baris non-frozen: sisakan satu baris kosong di akhir grid
+        n_del = sum(b - a + 1 for a, b in blocks)
+        if n_del >= ws.row_count - (getattr(ws, 'frozen_row_count', 0) or 0):
+            ws.add_rows(1)
         ws.spreadsheet.batch_update({'requests': reqs})
     rows = _rows(df)
     for i in range(0, len(rows), _GS_CHUNK):
