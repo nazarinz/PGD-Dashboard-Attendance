@@ -550,6 +550,14 @@ def gs_open(ref):
     return gc.open_by_url(ref) if ref.startswith('http') else gc.open_by_key(ref)
 
 
+def _ensure_grid(ws, rows=None, cols=None):
+    """Google Sheets menolak tulis di luar grid (error 'exceeds grid limits'): perluas dulu bila perlu."""
+    if rows and ws.row_count < rows:
+        ws.add_rows(rows - ws.row_count)
+    if cols and ws.col_count < cols:
+        ws.add_cols(cols - ws.col_count)
+
+
 def gs_get_ws(sh, title, header):
     try:
         ws = sh.worksheet(title)
@@ -558,6 +566,7 @@ def gs_get_ws(sh, title, header):
             raise
         ws = sh.add_worksheet(title=title, rows=2, cols=max(len(header), 2))
     if not ws.row_values(1):
+        _ensure_grid(ws, 1, len(header))
         ws.update(range_name='A1', values=[header], raw=False)
     return ws
 
@@ -591,6 +600,7 @@ def gs_migrate_period_cols(ws, df_cols):
         cell = {'Period_Key': info_['Period_Key'], 'Period_Label': "'" + info_['Period_Label'],
                 'Period_Date': info_['Period_Date'].strftime('%Y-%m-%d')}
         out.append([cell[c] for c in missing])
+    _ensure_grid(ws, len(out), len(header) + len(missing))
     ws.update(range_name=_a1(1, len(header) + 1), values=out, raw=False)
     return True
 
@@ -635,6 +645,7 @@ def gs_rebuild_period(sh, ws_daily):
         pi_ = period_info(k)
         rows.append([k, "'" + pi_['Period_Label'], pi_['Period_Date'].strftime('%Y-%m-%d'), i, 1 if i == len(keys) else 0])
     ws.clear()
+    _ensure_grid(ws, len(rows) + 1, len(hdr))
     ws.update(range_name='A1', values=[hdr] + rows, raw=False)
     return len(rows)
 
@@ -651,6 +662,7 @@ def gs_merge_team(sh, team):
         old_name = cur.get(t.NIK, ['', '', ''])[1]
         cur[t.NIK] = [t.NIK, t.Nama_File if str(t.Nama_File).strip() else old_name, t.Team]
     ws.clear()
+    _ensure_grid(ws, len(cur) + 1, len(hdr))
     ws.update(range_name='A1', values=[hdr] + [cur[k] for k in sorted(cur)], raw=False)
     return len(cur)
 
